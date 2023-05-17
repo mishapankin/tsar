@@ -144,6 +144,9 @@ private:
     bool isTransformationValid(Loop *L, AllocaInst *AI, ReductionInfo &info);
     std::vector<ReductionInfo> getReductions(Loop *L, AllocaInst *AI);
 
+    void replaceStoreWithSwitch(Loop *L, AllocaInst *AI, StoreInst *SI, const std::vector<Value *> &values);
+    void replaceLoadWithSwitch(Loop *L, AllocaInst *AI, LoadInst *LI, const std::vector<Value *> &values);
+
 
     AliasTree *AT;
     DependenceInfo *depInfo;
@@ -343,7 +346,10 @@ bool ArrayScalarizerPass::makeTransformation(Loop *L, AllocaInst *AI) {
     insertEpilogue(L, AI, values);
 
     for (auto reduction: reductions) {
-        replaceReductionWithSwitch(L, AI, reduction, values);
+        // replaceReductionWithSwitch(L, AI, reduction, values);
+        replaceLoadWithSwitch(L, AI, reduction.load, values);
+
+        replaceStoreWithSwitch(L, AI, reduction.store, values);
     }
 
     return true;
@@ -456,4 +462,67 @@ void ArrayScalarizerPass::replaceReductionWithSwitch(Loop *L, AllocaInst *AI, Re
     info.load->eraseFromParent();
 
     info.addr->eraseFromParent();
+}
+
+void ArrayScalarizerPass::replaceLoadWithSwitch(Loop *L, AllocaInst *AI, LoadInst *LI, const std::vector<Value *> &values) {
+    auto &context = L->getHeader()->getContext();
+    auto *F = L->getHeader()->getParent();
+    auto *BB = LI->getParent();
+
+    auto *pBB = BB->splitBasicBlock(LI);
+
+    auto *CI = getLoadStoreIndex(LI);
+
+    auto *switchInst = SwitchInst::Create(CI, pBB, values.size());
+    ReplaceInstWithInst(BB->getTerminator(), switchInst);
+
+    IRBuilder<> builder1(BB);
+    builder1.SetInsertPoint(switchInst);
+    auto *load0 = builder1.CreateLoad(getAllocatedArrayElementType(AI), values[0]);
+
+    IRBuilder<> builder(pBB);
+    builder.SetInsertPoint(pBB->getFirstNonPHI());
+    auto *phi = builder.CreatePHI(getAllocatedArrayElementType(AI), values.size() + 1);
+
+    phi->addIncoming(load0, BB);
+
+    for (int i = 1; i < values.size(); ++i) {
+        auto *caseBB = BasicBlock::Create(context, "case", F, BB);
+        IRBuilder<> caseBuilder(caseBB);
+
+        auto *load = caseBuilder.CreateLoad(getAllocatedArrayElementType(AI), values[i]);
+
+        auto *br = caseBuilder.CreateBr(pBB);
+
+        switchInst->addCase(ConstantInt::get(Type::getInt64Ty(context), i), caseBB);
+        phi->addIncoming(load, caseBB);
+    }
+
+    LI->replaceAllUsesWith(phi);
+}
+
+void ArrayScalarizerPass::replaceStoreWithSwitch(Loop *L, AllocaInst *AI, StoreInst *SI, const std::vector<Value *> &values) {
+    auto &context = L->getHeader()->getContext();
+    auto *F = L->getHeader()->getParent();
+    auto *BB = SI->getParent();
+
+    auto *pBB = BB->splitBasicBlock(SI);
+
+    auto *CI = getLoadStoreIndex(SI);
+
+    auto *switchInst = SwitchInst::Create(CI, pBB, values.size());
+    ReplaceInstWithInst(BB->getTerminator(), switchInst);
+
+    for (int i = 0; i < values.size(); ++i) {
+        auto *caseBB = BasicBlock::Create(context, "case", F, BB);
+        IRBuilder<> caseBuilder(caseBB);
+
+        auto *store = caseBuilder.CreateStore(SI->getValueOperand(), values[i]);
+
+        auto *br = caseBuilder.CreateBr(pBB);
+
+        switchInst->addCase(ConstantInt::get(Type::getInt64Ty(context), i), caseBB);
+    }
+
+    SI->eraseFromParent();
 }
