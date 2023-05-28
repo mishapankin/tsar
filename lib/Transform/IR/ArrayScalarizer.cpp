@@ -168,6 +168,8 @@ LoopPass * llvm::createArrayScalarizerPass() {
 }
 
 bool ArrayScalarizerPass::runOnLoop(Loop *L, LPPassManager &LPM) {
+    return false;
+
     AT = &getAnalysis<EstimateMemoryPass>().getAliasTree();
     depInfo = &getAnalysis<DependenceAnalysisWrapperPass>().getDI();
 
